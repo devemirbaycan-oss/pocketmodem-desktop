@@ -140,6 +140,15 @@ public sealed class ConnectionManager : IDisposable
                         StateChanged?.Invoke("no response from phone - reconnecting");
                         await ReconnectAsync(ct);
                     }
+                    else if (!client.UpstreamUp)
+                    {
+                        // The phone is answering but has no internet of its own,
+                        // which is what a network handover looks like from here.
+                        // Reconnecting would not help - the link is fine - so say
+                        // so and wait for the phone to come back, rather than
+                        // reporting a healthy connection that carries nothing.
+                        StateChanged?.Invoke("phone has no mobile data right now");
+                    }
                 }
                 else
                 {

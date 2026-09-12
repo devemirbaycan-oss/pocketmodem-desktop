@@ -65,7 +65,7 @@ Source: "..\dist\libSkiaSharp.dll"; DestDir: "{app}"; Flags: ignoreversion skipi
 
 ; Recovery script, so a user whose routing is stranded has something to run
 ; without needing the command line.
-Source: "..\dist\FIX-MY-INTERNET.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "FIX-MY-INTERNET.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 Source: "..\README.md"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignoreversion
 

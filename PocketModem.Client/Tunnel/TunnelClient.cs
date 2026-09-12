@@ -66,6 +66,24 @@ public sealed class TunnelClient : IDisposable
     private CancellationTokenSource? _cts;
 
     /// <summary>
+    /// Kept so a link can be reopened later. Every link authenticates
+    /// independently, so repairing one needs the same token the first four
+    /// were opened with.
+    /// </summary>
+    private string _token = "";
+
+    /// <summary>
+    /// Spreads datagrams over the links.
+    ///
+    /// UDP has no stream id to hash - every datagram goes out as stream 0 - so
+    /// without this the whole of UDP rode link 0. Round-robin is the right
+    /// choice here rather than hashing by port: datagrams are independent, so
+    /// there is no ordering to preserve, and a hash would still pin one busy
+    /// flow to one link.
+    /// </summary>
+    private int _udpCursor;
+
+    /// <summary>
     /// Shared across reconnects, because a new client restarting at 1 would
     /// reuse ids the phone may still be holding from the previous session.
     /// </summary>
@@ -77,6 +95,18 @@ public sealed class TunnelClient : IDisposable
     public event Action<int, byte[], int, byte[]>? UdpReceived;
     public event Action<string>? Disconnected;
     public event Action? PongReceived;
+
+    /// <summary>
+    /// What the phone last said about its own internet connection.
+    ///
+    /// Separate from IsConnected, which is only about the link to the phone.
+    /// Both must hold for traffic to flow, and they fail independently: during
+    /// a handover between LTE and 5G the link stays perfectly healthy while
+    /// nothing reaches the internet. Until the phone began stamping this onto
+    /// pongs, the PC could see only the first and reported "connected"
+    /// throughout.
+    /// </summary>
+    public bool UpstreamUp { get; private set; } = true;
 
     /// <summary>Set when the phone refused our pairing token.</summary>
     public bool Rejected { get; private set; }
@@ -155,6 +185,7 @@ public sealed class TunnelClient : IDisposable
         // to be exchanged. HELLO itself stays in the clear because it carries
         // the token that proves we are allowed to talk at all.
         if (!string.IsNullOrEmpty(token)) _crypto = new Crypto(token);
+        _token = token;
 
         // Link 0 first: if the pairing token is wrong, learn it once rather
         // than opening four connections only to have all four refused.
@@ -170,10 +201,66 @@ public sealed class TunnelClient : IDisposable
                 Console.WriteLine($"  tunnel: link {i} could not be opened; continuing");
         }
 
+        // Links die individually - a phone that briefly stops answering, a
+        // radio glitch, one socket reset - and until now none of them ever
+        // came back. Nothing else notices: IsConnected is true while any link
+        // lives, so a session could sit at one link of four indefinitely,
+        // carrying four times the traffic it was designed for on a quarter of
+        // the sockets.
+        _ = Task.Run(() => RepairLinksAsync(_cts.Token), _cts.Token);
+
         return true;
     }
 
-    private async Task<bool> OpenLinkAsync(int index, string token, CancellationToken ct)
+    /// <summary>
+    /// Reopen links that have died, while the tunnel is otherwise healthy.
+    ///
+    /// Deliberately separate from the reconnect path in ConnectionManager: that
+    /// one rebuilds the whole tunnel and resets every TCP flow, which is the
+    /// right response to losing the last link and far too much for losing one
+    /// of four. Repairing in place keeps every open connection alive.
+    /// </summary>
+    private async Task RepairLinksAsync(CancellationToken ct)
+    {
+        // Long enough that a link dropping and instantly returning does not
+        // cause a reconnect storm, short enough that a degraded session
+        // recovers before anyone notices it.
+        var interval = TimeSpan.FromSeconds(5);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(interval, ct);
+
+                // Nothing to repair onto: the whole tunnel is gone, and that
+                // is ConnectionManager's job, not this loop's.
+                if (!IsConnected) continue;
+
+                for (int i = 0; i < LinkCount; i++)
+                {
+                    if (ct.IsCancellationRequested) return;
+                    if (_links.TryGetValue(i, out var existing) && !existing.Closed) continue;
+
+                    if (await OpenLinkAsync(i, _token, ct, repair: true))
+                        Console.WriteLine($"  tunnel: link {i} restored ({ConnectedLinks}/{LinkCount})");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                // A failed repair is not fatal - the surviving links keep
+                // carrying traffic, and the next pass tries again.
+                Console.WriteLine($"  tunnel: link repair failed: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task<bool> OpenLinkAsync(int index, string token, CancellationToken ct,
+        bool repair = false)
     {
         try
         {
@@ -204,7 +291,11 @@ public sealed class TunnelClient : IDisposable
                 hello.AsSpan(2, Protocol.ClientIdSize), _clientId);
             tokenBytes.CopyTo(hello, 2 + Protocol.ClientIdSize);
 
-            await SendOnAsync(link, Protocol.Hello, 0, 0, hello);
+            // The repair bit keeps the phone from treating a reopened link 0
+            // as a fresh session and discarding streams the other links are
+            // still carrying.
+            byte flags = repair ? Protocol.FlagLinkRepair : (byte)0;
+            await SendOnAsync(link, Protocol.Hello, flags, 0, hello);
             return true;
         }
         catch (Exception ex)
@@ -227,6 +318,25 @@ public sealed class TunnelClient : IDisposable
             return preferred;
         // Fall back to any live link so a frame is not lost while one link is
         // reconnecting.
+        return _links.Values.FirstOrDefault(l => !l.Closed);
+    }
+
+    /// <summary>
+    /// The next link for a datagram, skipping dead ones.
+    ///
+    /// Unlike a TCP stream, a datagram has no ordering to protect, so it can
+    /// take whichever link is free rather than being pinned to one.
+    /// </summary>
+    private Link? PickLinkForDatagram()
+    {
+        for (int attempt = 0; attempt < LinkCount; attempt++)
+        {
+            int index = (int)((uint)Interlocked.Increment(ref _udpCursor) % LinkCount);
+            if (_links.TryGetValue(index, out var link) && !link.Closed)
+                return link;
+        }
+
+        // Every preferred slot was dead; take anything still open.
         return _links.Values.FirstOrDefault(l => !l.Closed);
     }
 
@@ -267,7 +377,15 @@ public sealed class TunnelClient : IDisposable
         // receiver cannot infer the width from the frame length.
         byte flags = dstIp.Length == 16 ? Protocol.FlagIpv6 : (byte)0;
         var payload = Protocol.EncodeDatagram(srcPort, dstIp, dstPort, data);
-        return SendFrameAsync(Protocol.UdpDatagram, flags, 0, payload);
+
+        // Round-robin rather than link 0. The frame still carries stream id 0 -
+        // that is its protocol identity and the phone reads it the same way -
+        // but which socket carries it is ours to choose. The phone's read loop
+        // uses the arriving link only to read from, so nothing there depends
+        // on UDP arriving on link 0.
+        var link = PickLinkForDatagram();
+        if (link is null) return Task.CompletedTask;
+        return SendOnAsync(link, Protocol.UdpDatagram, flags, 0, payload);
     }
 
     /// <summary>
@@ -406,6 +524,13 @@ public sealed class TunnelClient : IDisposable
                 break;
 
             case Protocol.Pong:
+                // Anything past the echoed 8-byte timestamp is the phone's
+                // upstream state. A phone predating this sends nothing extra,
+                // which leaves the flag true - the old behaviour, so an older
+                // phone keeps working rather than looking permanently offline.
+                if (payload.Length > 8)
+                    UpstreamUp = payload[8] != Protocol.UpstreamState.Down;
+
                 PongReceived?.Invoke();
                 break;
 

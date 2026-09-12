@@ -67,6 +67,17 @@ public sealed class TunnelSession : IDisposable
     public IReadOnlyList<string> RecentCloses =>
         _connection?.RecentCloses ?? Array.Empty<string>();
     public bool Connected => _connection?.IsConnected == true;
+
+    /// <summary>
+    /// Whether the phone has mobile data, as distinct from whether this PC can
+    /// reach the phone.
+    ///
+    /// Both must hold for traffic to flow, and they fail independently: during
+    /// a network handover the link stays perfectly healthy while nothing
+    /// reaches the internet. Reporting only the link is what made the app say
+    /// "connected" through an outage.
+    /// </summary>
+    public bool UpstreamUp => _connection?.Current?.UpstreamUp != false;
     /// <summary>Live parallel links; fewer than the max is degraded, not broken.</summary>
     public int Links => _connection?.Current?.ConnectedLinks ?? 0;
     public int MaxLinks => Tunnel.TunnelClient.LinkCount;

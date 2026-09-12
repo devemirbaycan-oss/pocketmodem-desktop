@@ -43,10 +43,42 @@ public static class Protocol
     public const byte Ping = 0x40;
     public const byte Pong = 0x41;
 
+    /// <summary>
+    /// Upstream state, appended by the phone after a PONG's echoed payload.
+    ///
+    /// A pong is answered on the phone's link thread and never touches the
+    /// cellular interface, so on its own it proves the phone is alive rather
+    /// than that it has internet. This is what separates the two.
+    ///
+    /// A phone that predates it echoes the payload unchanged, which reads as
+    /// Unknown - treated as up, exactly as before.
+    /// </summary>
+    public static class UpstreamState
+    {
+        public const byte Unknown = 0;
+        public const byte Up = 1;
+        public const byte Down = 2;
+    }
+
     public const byte Stats = 0x50;
 
     /// <summary>Set in a frame's flags byte when its addresses are IPv6.</summary>
     public const byte FlagIpv6 = 0x01;
+
+    /// <summary>
+    /// Set on a HELLO that reopens one link of an existing session, rather
+    /// than starting a new one.
+    ///
+    /// The phone discards a client's streams when link 0 says hello, because a
+    /// reconnecting PC renumbers its streams from 1 and the old ids would
+    /// collide. A repaired link is the opposite case: the other links are
+    /// still carrying those very streams, and clearing them would turn the
+    /// loss of one socket into the loss of the session.
+    ///
+    /// Carried in flags rather than a version bump, so a phone that predates
+    /// it simply ignores the bit and behaves as it always did.
+    /// </summary>
+    public const byte FlagLinkRepair = 0x02;
 
     public static class CloseReason
     {

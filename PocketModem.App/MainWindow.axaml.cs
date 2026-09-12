@@ -318,6 +318,12 @@ public partial class MainWindow : Window
 
             if (!s.Connected)
                 SetStatus("Reconnecting", "The adapter stays up, so apps keep their connections.", Amber);
+            // The link can be perfectly healthy while the phone itself has no
+            // signal - a handover between LTE and 5G looks exactly like this.
+            // Saying "connected" here was the single most misleading thing the
+            // app did, because nothing was actually getting through.
+            else if (!s.UpstreamUp)
+                SetStatus("Phone has no signal", "The link is fine; the phone's mobile data is not.", Amber);
             else if (s.Links < s.MaxLinks)
                 SetStatus("Connected", $"Running on {s.Links} of {s.MaxLinks} links.", Amber);
             else if (StatusText.Text != "Connected")
