@@ -53,6 +53,17 @@ public sealed class PacketPump
     /// </summary>
     private const byte WindowScaleShift = 7;
 
+    /// <summary>
+    /// How much unsent data a single flow may hold before we start closing its
+    /// window.
+    ///
+    /// One megabyte is roughly a second of a fast cellular link and several of
+    /// a slow one - enough that a burst is absorbed rather than throttled, and
+    /// little enough that the sender learns about congestion in time to slow
+    /// down instead of overrunning us.
+    /// </summary>
+    private const long PerFlowBudget = 1024 * 1024;
+
     private readonly ConcurrentDictionary<string, TcpFlow> _flowsByKey = new();
     private readonly ConcurrentDictionary<int, TcpFlow> _flowsByStream = new();
 
@@ -129,6 +140,17 @@ public sealed class PacketPump
 
         public bool Established;
         public bool Closing;
+
+        /// <summary>
+        /// Bytes accepted from Windows and handed to the tunnel, less those the
+        /// tunnel has finished sending.
+        ///
+        /// This is what the advertised window is derived from. Without it the
+        /// window was a constant, so the sender was invited to keep 8 MB in
+        /// flight no matter how slowly the far side was draining - and on a
+        /// slow upstream that guarantees a stall rather than a slowdown.
+        /// </summary>
+        public long InFlightBytes;
 
         /// <summary>
         /// Which IP version this flow speaks. Replies must be synthesised with
@@ -252,7 +274,19 @@ public sealed class PacketPump
         if (payload.Length > 0)
         {
             existing.TheirSeq = pkt.TcpSequence + (uint)payload.Length;
-            _tunnel.SendTcpAsync(existing.StreamId, payload.ToArray());
+
+            int length = payload.Length;
+            Interlocked.Add(ref existing.InFlightBytes, length);
+
+            // Discount it once the tunnel has actually taken it. Doing this on
+            // completion rather than on submission is the whole point: the
+            // window then tracks what the link has drained, not what we have
+            // been handed.
+            _ = _tunnel.SendTcpAsync(existing.StreamId, payload.ToArray())
+                .ContinueWith(
+                    _ => Interlocked.Add(ref existing.InFlightBytes, -length),
+                    TaskContinuationOptions.ExecuteSynchronously);
+
             // Acknowledge immediately. Delaying would halve throughput on a
             // link where the real ACK has to cross the tunnel and back.
             SendToWindows(existing, syn: false, ack: true, fin: false, rst: false, ReadOnlySpan<byte>.Empty);
@@ -410,6 +444,23 @@ public sealed class PacketPump
         }
     }
 
+    /// <summary>
+    /// What is left of this flow's budget, in units of the scale we advertised.
+    ///
+    /// Returns zero when the budget is spent, which tells the sender to stop
+    /// until we catch up - a pause it can recover from, unlike the stall that
+    /// followed promising space we did not have.
+    /// </summary>
+    private static ushort AdvertisedWindow(TcpFlow flow)
+    {
+        long free = PerFlowBudget - Interlocked.Read(ref flow.InFlightBytes);
+        if (free <= 0) return 0;
+
+        // The field is 16 bits and the peer multiplies it by 2^shift.
+        long scaled = free >> WindowScaleShift;
+        return (ushort)Math.Min(scaled, ushort.MaxValue);
+    }
+
     /// <summary>Read the window-scale shift from a SYN's options, if present.</summary>
     private static int ReadWindowScale(in IpPacket pkt)
     {
@@ -474,7 +525,12 @@ public sealed class PacketPump
         // The window field is scaled by the shift we advertised, EXCEPT on the
         // SYN itself - the option is being negotiated there, so that one value
         // is unscaled by definition.
-        BinaryPrimitives.WriteUInt16BigEndian(tcp[14..], 65535);
+        //
+        // What goes here is what is actually left of this flow's budget, not a
+        // fixed maximum. Advertising 65535 << 7 unconditionally promised 8 MB
+        // of buffering the tunnel does not have, and a sender that took us at
+        // our word overran a slow upstream and stalled the connection.
+        BinaryPrimitives.WriteUInt16BigEndian(tcp[14..], AdvertisedWindow(flow));
 
         if (!options.IsEmpty) options.CopyTo(tcp[20..]);
         payload.CopyTo(tcp[tcpHeaderLen..]);
@@ -519,7 +575,7 @@ public sealed class PacketPump
         if (ack) flags |= 0x10;
         tcp[13] = flags;
 
-        BinaryPrimitives.WriteUInt16BigEndian(tcp[14..], 65535);
+        BinaryPrimitives.WriteUInt16BigEndian(tcp[14..], AdvertisedWindow(flow));
         if (!options.IsEmpty) options.CopyTo(tcp[20..]);
         payload.CopyTo(tcp[tcpHeaderLen..]);
 
