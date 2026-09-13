@@ -56,14 +56,37 @@ public sealed class WintunAdapter : Platform.ITunAdapter
         return new WintunAdapter(handle, name);
     }
 
+    /// <summary>Windows: the adapter already has a session open.</summary>
+    private const int ErrorAlreadyInitialized = 1247;
+
     public void StartSession(uint capacity = WintunInterop.RingCapacity)
     {
-        _session = WintunInterop.StartSession(_adapter, capacity);
-        if (_session == IntPtr.Zero)
+        // Starting twice would leak the first session and fail anyway.
+        if (_session != IntPtr.Zero) return;
+
+        // An adapter left by a process that has just exited can still hold a
+        // session for a moment after the process is gone, and Create() will
+        // happily reopen it in that window - so the adapter is ours while the
+        // session is not. Waiting it out beats failing, because the alternative
+        // is a reconnect loop that retries into the same window forever.
+        for (int attempt = 0; ; attempt++)
         {
-            throw new InvalidOperationException(
-                $"WintunStartSession failed (error {Marshal.GetLastWin32Error()})");
+            _session = WintunInterop.StartSession(_adapter, capacity);
+            if (_session != IntPtr.Zero) break;
+
+            int err = Marshal.GetLastWin32Error();
+            if (err != ErrorAlreadyInitialized || attempt >= 10)
+            {
+                throw new InvalidOperationException(
+                    $"WintunStartSession failed (error {err})" +
+                    (err == ErrorAlreadyInitialized
+                        ? ". Another copy of PocketModem is using the adapter - close it and try again."
+                        : "."));
+            }
+
+            Thread.Sleep(300);
         }
+
         _readEvent = WintunInterop.GetReadWaitEvent(_session);
     }
 

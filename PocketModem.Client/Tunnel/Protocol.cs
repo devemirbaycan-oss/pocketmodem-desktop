@@ -27,6 +27,37 @@ public static class Protocol
     /// <summary>HELLO: version(1) linkIndex(1) clientId(4) token(rest) from v2.</summary>
     public const int ClientIdSize = 4;
 
+    /// <summary>
+    /// Bytes of sequence number prefixed to every TCP_DATA payload once
+    /// striping is agreed.
+    ///
+    /// A stream's frames go out across all four links at once, which is worth
+    /// roughly three times the throughput of one link but lets them arrive out
+    /// of order. The sequence number is what the receiver reassembles by.
+    /// Only TCP_DATA carries it: UDP has no ordering to keep, and control
+    /// frames are not a byte stream.
+    /// </summary>
+    public const int SequenceSize = 4;
+
+    /// <summary>
+    /// Set in HELLO_ACK's flags when the phone can reassemble striped frames.
+    ///
+    /// Negotiated rather than assumed: a PC that striped to a phone which did
+    /// not expect it would deliver a stream's bytes in whatever order the four
+    /// links happened to finish in, which is silent corruption rather than a
+    /// failure anyone could trace.
+    /// </summary>
+    public const byte FlagStriping = 0x04;
+
+    /// <summary>
+    /// Set in HELLO_ACK's flags when the phone refused the pairing token.
+    ///
+    /// Its own bit rather than "any non-zero byte": the flags field carries
+    /// capabilities too, and conflating the two made a phone advertising
+    /// striping look like a phone rejecting the code.
+    /// </summary>
+    public const byte FlagRejected = 0x01;
+
     public const byte Hello = 0x01;
     public const byte HelloAck = 0x02;
 

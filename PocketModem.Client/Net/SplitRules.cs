@@ -80,7 +80,7 @@ public sealed class SplitRules
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  split rules could not be read ({ex.Message}); using defaults");
+            ActivityLog.WriteAndPrint($"  split rules could not be read ({ex.Message}); using defaults");
         }
 
         rules.AddDefaults();
@@ -104,7 +104,7 @@ public sealed class SplitRules
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  split rules could not be saved: {ex.Message}");
+            ActivityLog.WriteAndPrint($"  split rules could not be saved: {ex.Message}");
         }
     }
 

@@ -171,7 +171,7 @@ public sealed class PacketPump
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  outbound packet error: {ex.Message}");
+                ActivityLog.WriteAndPrint($"  outbound packet error: {ex.Message}");
             }
         }
     }
@@ -277,7 +277,7 @@ public sealed class PacketPump
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  inbound data error on stream {streamId}: {ex.Message}");
+            ActivityLog.WriteAndPrint($"  inbound data error on stream {streamId}: {ex.Message}");
         }
     }
 
@@ -306,7 +306,7 @@ public sealed class PacketPump
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  close error on stream {streamId}: {ex.Message}");
+            ActivityLog.WriteAndPrint($"  close error on stream {streamId}: {ex.Message}");
         }
     }
 
@@ -350,7 +350,7 @@ public sealed class PacketPump
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  inbound datagram error: {ex.Message}");
+            ActivityLog.WriteAndPrint($"  inbound datagram error: {ex.Message}");
         }
     }
 

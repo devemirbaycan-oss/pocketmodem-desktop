@@ -54,6 +54,17 @@ public sealed class TunnelSession : IDisposable
     public int ActiveStreams => _connection?.Current?.ActiveStreams ?? 0;
 
     /// <summary>
+    /// Streams the phone is holding, as it reports them. -1 if unknown.
+    ///
+    /// Distinct from ActiveStreams, which is this PC's own count: a gap
+    /// between the two is the signature of a leak on the phone.
+    /// </summary>
+    public int PhoneStreams => _connection?.Current?.PhoneStreams ?? -1;
+
+    /// <summary>Which build the phone is running, so a push can be confirmed.</summary>
+    public long PhoneBuild => _connection?.Current?.PhoneBuild ?? 0;
+
+    /// <summary>
     /// Packets a split rule kept off the phone.
     ///
     /// Worth surfacing because the failure mode of split tunnelling is silence:

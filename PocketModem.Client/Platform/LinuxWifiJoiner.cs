@@ -56,7 +56,7 @@ public sealed class LinuxWifiJoiner : IWifiJoiner
 
         if (!HasCommand("nmcli"))
         {
-            Console.WriteLine(
+            ActivityLog.WriteAndPrint(
                 "  nmcli not found. Join the phone's network manually, then run " +
                 "this again - the tunnel only needs an address on its subnet.");
             return false;
@@ -70,7 +70,7 @@ public sealed class LinuxWifiJoiner : IWifiJoiner
         var (ok, output) = Run("nmcli", $"device wifi connect \"{_ssid}\" password \"{passphrase}\"");
         if (!ok)
         {
-            Console.WriteLine($"  nmcli connect failed: {output.Trim()}");
+            ActivityLog.WriteAndPrint($"  nmcli connect failed: {output.Trim()}");
             return false;
         }
         _joined = true;

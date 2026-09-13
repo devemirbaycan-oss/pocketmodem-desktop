@@ -11,6 +11,8 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        PocketModem.Client.ActivityLog.Start();
+
         CommandLine cmd;
         try
         {

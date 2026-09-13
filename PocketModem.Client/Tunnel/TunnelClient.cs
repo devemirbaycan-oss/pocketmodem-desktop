@@ -108,6 +108,64 @@ public sealed class TunnelClient : IDisposable
     /// </summary>
     public bool UpstreamUp { get; private set; } = true;
 
+    /// <summary>
+    /// Streams the phone is holding for every client, from its pongs.
+    ///
+    /// The number that reveals a leak in the phone's stream map: it climbs
+    /// toward the phone's ceiling while UDP carries on working, and past it
+    /// every new TCP connection is refused. Without it on the wire that
+    /// failure can only be inferred from which sites break, which is a poor
+    /// substitute for reading the count.
+    ///
+    /// -1 when the phone has not reported one.
+    /// </summary>
+    public int PhoneStreams { get; private set; } = -1;
+
+    /// <summary>
+    /// Identifies the build running on the phone, from HELLO_ACK.
+    ///
+    /// versionName stays "1.0.0" across development builds, so without this
+    /// there is no way to tell whether a pushed APK was actually installed -
+    /// and "the fix does not work" is indistinguishable from "the fix is not
+    /// running". 0 when the phone predates the stamp.
+    /// </summary>
+    public long PhoneBuild { get; private set; }
+
+    /// <summary>
+    /// Whether the phone can reassemble frames spread across links.
+    ///
+    /// Only then may a stream use more than one: a phone that cannot
+    /// reassemble would hand its upstream socket bytes in whatever order four
+    /// links happened to finish in, which corrupts the stream silently rather
+    /// than failing visibly. Off until HELLO_ACK says otherwise, so an older
+    /// phone keeps the pinned single-link behaviour.
+    /// </summary>
+    /// <summary>
+    /// Off. Splitting one ordered stream across four links made it run at the
+    /// speed of the slowest link rather than the sum of them: the receiver
+    /// cannot deliver frame N+1 until N lands, so every link waits on the
+    /// worst one. The measurement it was built on - four independent sockets
+    /// reaching 99 Mbps against one reaching 31 - did not carry over, because
+    /// those sockets had no ordering between them.
+    ///
+    /// The mechanism stays because it is correct and tested; what was wrong
+    /// was applying it to a single stream. Concurrent streams already use
+    /// different links, which is the version of this that works.
+    /// </summary>
+    public bool StripingAgreed { get; private set; }
+
+    /// <summary>
+    /// Sequencing state per stream: what to stamp on the way out, and how to
+    /// put the phone's frames back in order on the way in.
+    /// </summary>
+    private sealed class StreamOrder
+    {
+        public int NextSend;
+        public readonly Reassembler Inbound = new();
+    }
+
+    private readonly ConcurrentDictionary<int, StreamOrder> _order = new();
+
     /// <summary>Set when the phone refused our pairing token.</summary>
     public bool Rejected { get; private set; }
 
@@ -198,7 +256,7 @@ public sealed class TunnelClient : IDisposable
         for (int i = 1; i < LinkCount; i++)
         {
             if (!await OpenLinkAsync(i, token, _cts.Token))
-                Console.WriteLine($"  tunnel: link {i} could not be opened; continuing");
+                ActivityLog.WriteAndPrint($"  tunnel: link {i} could not be opened; continuing");
         }
 
         // Links die individually - a phone that briefly stops answering, a
@@ -243,7 +301,7 @@ public sealed class TunnelClient : IDisposable
                     if (_links.TryGetValue(i, out var existing) && !existing.Closed) continue;
 
                     if (await OpenLinkAsync(i, _token, ct, repair: true))
-                        Console.WriteLine($"  tunnel: link {i} restored ({ConnectedLinks}/{LinkCount})");
+                        ActivityLog.WriteAndPrint($"  tunnel: link {i} restored ({ConnectedLinks}/{LinkCount})");
                 }
             }
             catch (OperationCanceledException)
@@ -254,7 +312,7 @@ public sealed class TunnelClient : IDisposable
             {
                 // A failed repair is not fatal - the surviving links keep
                 // carrying traffic, and the next pass tries again.
-                Console.WriteLine($"  tunnel: link repair failed: {ex.Message}");
+                ActivityLog.WriteAndPrint($"  tunnel: link repair failed: {ex.Message}");
             }
         }
     }
@@ -358,16 +416,77 @@ public sealed class TunnelClient : IDisposable
         _streams[id] = new StreamHandle(id, dst, dstPort);
 
         var payload = Protocol.EncodeOpen(dstIp, dstPort);
+
+        // The open must not be overtaken by its own first data frame. Striping
+        // sends data across every link, so a frame can reach the phone before
+        // the open that creates the stream - the phone then resets a stream it
+        // has never seen. Putting the open on the link that will carry
+        // sequence 0 keeps the two in order on one socket.
+        if (StripingAgreed)
+        {
+            var openLink = PickStripedLink(0);
+            if (openLink is not null)
+            {
+                _ = SendOnAsync(openLink, Protocol.TcpOpen, 0, id, payload);
+                return id;
+            }
+        }
+
         _ = SendFrameAsync(Protocol.TcpOpen, 0, id, payload);
         return id;
     }
 
-    public Task SendTcpAsync(int streamId, byte[] data) =>
-        SendFrameAsync(Protocol.TcpData, 0, streamId, data);
+    /// <summary>
+    /// Send stream data, across every link when the phone can reassemble.
+    ///
+    /// Pinning a stream to one link capped a single download at that link's
+    /// throughput - 31 Mbps measured, against 99 for the radio as a whole.
+    /// The sequence number in front of the payload is what makes spreading it
+    /// safe: which link carries a frame stops mattering once the receiver can
+    /// put them back in order.
+    /// </summary>
+    public Task SendTcpAsync(int streamId, byte[] data)
+    {
+        if (!StripingAgreed)
+            return SendFrameAsync(Protocol.TcpData, 0, streamId, data);
+
+        var order = _order.GetOrAdd(streamId, static _ => new StreamOrder());
+
+        byte[] payload;
+        Link? link;
+
+        // Sequence and link are chosen together: two frames that swapped
+        // either would be reassembled in the wrong order.
+        lock (order)
+        {
+            int seq = order.NextSend++;
+            payload = new byte[Protocol.SequenceSize + data.Length];
+            BinaryPrimitives.WriteInt32BigEndian(payload, seq);
+            data.CopyTo(payload.AsSpan(Protocol.SequenceSize));
+
+            link = PickStripedLink(seq);
+        }
+
+        if (link is null) return Task.CompletedTask;
+        return SendOnAsync(link, Protocol.TcpData, 0, streamId, payload);
+    }
+
+    /// <summary>Round-robin over live links, so none of them bounds a stream.</summary>
+    private Link? PickStripedLink(int seq)
+    {
+        for (int i = 0; i < LinkCount; i++)
+        {
+            int index = (int)((uint)(seq + i) % LinkCount);
+            if (_links.TryGetValue(index, out var candidate) && !candidate.Closed)
+                return candidate;
+        }
+        return _links.Values.FirstOrDefault(l => !l.Closed);
+    }
 
     public Task CloseStreamAsync(int streamId)
     {
         _streams.TryRemove(streamId, out _);
+        _order.TryRemove(streamId, out _);
         return SendFrameAsync(Protocol.TcpClose, Protocol.CloseReason.Normal, streamId, Array.Empty<byte>());
     }
 
@@ -476,7 +595,7 @@ public sealed class TunnelClient : IDisposable
                     if (plain is null)
                     {
                         // Tampered, corrupt, or sealed under a different key.
-                        Console.WriteLine("  tunnel: dropped a frame that failed authentication");
+                        ActivityLog.WriteAndPrint("  tunnel: dropped a frame that failed authentication");
                         continue;
                     }
                     payload = plain;
@@ -500,20 +619,76 @@ public sealed class TunnelClient : IDisposable
         switch (type)
         {
             case Protocol.HelloAck:
-                // A non-zero flag means the phone refused the pairing token.
-                if (flags != 0)
+                // Rejection has its own bit. Testing the whole byte was fine
+                // while refusal was the only thing it carried, but the phone
+                // now also reports capabilities here - and reading "I can
+                // stripe" as "wrong pairing code" fails every connection.
+                if ((flags & Protocol.FlagRejected) != 0)
                 {
                     Rejected = true;
-                    Console.WriteLine("  tunnel: phone REJECTED this pairing code");
+                    ActivityLog.WriteAndPrint("  tunnel: phone REJECTED this pairing code");
                 }
+
+                // Two bytes of version and link count, then the build stamp.
+                // A phone predating the stamp sends only the first two.
+                if (payload.Length >= 10)
+                    PhoneBuild = BinaryPrimitives.ReadInt64BigEndian(payload.AsSpan(2, 8));
+
+                // Deliberately ignored. The phone still offers striping and
+                // will honour whatever we ask for; we no longer ask, because a
+                // single stream is slower spread across links than pinned to
+                // one. Re-enabling is a one-line change once the ordering cost
+                // is solved rather than assumed away.
+                // if ((flags & Protocol.FlagStriping) != 0) StripingAgreed = true;
                 break;
 
             case Protocol.TcpData:
-                TcpDataReceived?.Invoke(streamId, payload);
+                if (!StripingAgreed)
+                {
+                    TcpDataReceived?.Invoke(streamId, payload);
+                    break;
+                }
+
+                if (payload.Length < Protocol.SequenceSize)
+                {
+                    ActivityLog.WriteAndPrint($"  tunnel: runt data frame on stream {streamId}");
+                    break;
+                }
+
+                {
+                    // Striped frames arrive out of order by design. Windows
+                    // must see the stream's bytes in order or the connection
+                    // is corrupt, so nothing is delivered until the gaps close.
+                    int seq = BinaryPrimitives.ReadInt32BigEndian(payload);
+                    var body = payload[Protocol.SequenceSize..];
+                    var order = _order.GetOrAdd(streamId, static _ => new StreamOrder());
+
+                    List<byte[]> ready;
+                    bool lost;
+                    lock (order)
+                    {
+                        ready = order.Inbound.Accept(seq, body);
+                        lost = order.Inbound.Overflowed;
+                    }
+
+                    if (lost)
+                    {
+                        // The gap will not close: a frame went missing with a
+                        // link. Resetting is honest; releasing what is held
+                        // would corrupt the stream instead.
+                        ActivityLog.WriteAndPrint($"  tunnel: stream {streamId} lost a frame; resetting");
+                        _order.TryRemove(streamId, out _);
+                        TcpClosed?.Invoke(streamId, Protocol.CloseReason.Reset);
+                        break;
+                    }
+
+                    foreach (var chunk in ready) TcpDataReceived?.Invoke(streamId, chunk);
+                }
                 break;
 
             case Protocol.TcpClose:
                 _streams.TryRemove(streamId, out _);
+                _order.TryRemove(streamId, out _);
                 TcpClosed?.Invoke(streamId, flags);
                 break;
 
@@ -531,11 +706,15 @@ public sealed class TunnelClient : IDisposable
                 if (payload.Length > 8)
                     UpstreamUp = payload[8] != Protocol.UpstreamState.Down;
 
+                // Two more bytes, big-endian, are the phone's stream count.
+                if (payload.Length >= 11)
+                    PhoneStreams = (payload[9] << 8) | payload[10];
+
                 PongReceived?.Invoke();
                 break;
 
             default:
-                Console.WriteLine($"  tunnel: unhandled frame 0x{type:x2}");
+                ActivityLog.WriteAndPrint($"  tunnel: unhandled frame 0x{type:x2}");
                 break;
         }
     }

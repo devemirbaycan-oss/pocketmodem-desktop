@@ -157,6 +157,15 @@
             <TextBlock Grid.Column="0" Text="Open connections" Classes="label"/>
             <TextBlock x:Name="StreamCount" Grid.Column="1" Text="0" Classes="value"/>
           </Grid>
+          <!-- The phone's own count, beside this PC's. They should track each
+               other; a gap that only grows is the phone holding streams it has
+               already closed, which ends in every new connection being refused
+               while UDP carries on working. -->
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" Text="Held by the phone" Classes="label"/>
+            <TextBlock x:Name="PhoneStreamCount" Grid.Column="1" Text="-" Classes="value"/>
+          </Grid>
+
           <Grid ColumnDefinitions="*,Auto">
             <TextBlock Grid.Column="0" Text="Reconnects" Classes="label"/>
             <TextBlock x:Name="ReconnectCount" Grid.Column="1" Text="0" Classes="value"/>

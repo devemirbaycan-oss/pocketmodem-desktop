@@ -72,21 +72,47 @@ public sealed class WifiJoiner : Platform.IWifiJoiner
             await File.WriteAllTextAsync(profilePath, BuildProfileXml(_ssid, passphrase), ct);
 
             var (ok, output) = Run("netsh", $"wlan add profile filename=\"{profilePath}\" user=all");
-            if (!ok) return false;
+            if (!ok)
+            {
+                // netsh explains itself; discarding that left "could not join"
+                // as the only symptom of every possible cause.
+                ActivityLog.Write($"join: adding the profile failed: {output.Trim()}");
+                return false;
+            }
 
-            Run("netsh", $"wlan connect name=\"{_ssid}\"");
+            var (connected, connectOutput) = Run("netsh", $"wlan connect name=\"{_ssid}\"");
+            if (!connected)
+                ActivityLog.Write($"join: connect refused: {connectOutput.Trim()}");
+
+            ActivityLog.Write($"join: asked Windows to connect to {_ssid}");
 
             // Association plus DHCP takes a few seconds; poll rather than
             // guessing a fixed delay.
             for (int i = 0; i < 30 && !ct.IsCancellationRequested; i++)
             {
                 await Task.Delay(500, ct);
-                if (IsJoined()) return true;
+                if (IsJoined())
+                {
+                    ActivityLog.Write($"join: joined after {(i + 1) * 500} ms");
+                    return true;
+                }
             }
+
+            // Timing out is the common failure and said nothing at all. Whether
+            // the SSID is even visible is the difference between "the phone is
+            // not sharing" and "the passphrase is wrong", so record it.
+            var (_, scan) = Run("netsh", "wlan show networks");
+            bool visible = scan.Contains(_ssid, StringComparison.OrdinalIgnoreCase);
+            ActivityLog.Write(
+                $"join: gave up after 15 s. {_ssid} " +
+                (visible
+                    ? "IS visible - association or the passphrase is the problem."
+                    : "is NOT visible - the phone is not broadcasting the group."));
             return false;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            ActivityLog.Write($"join: failed with {ex.GetType().Name}: {ex.Message}");
             return false;
         }
         finally

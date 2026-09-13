@@ -61,7 +61,7 @@ public sealed class RouteManager : Platform.IRouteManager
 
         if (tunnelReachable())
         {
-            Console.WriteLine("  adopting the routes already in place");
+            ActivityLog.WriteAndPrint("  adopting the routes already in place");
             try
             {
                 var existing = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_journalPath));
@@ -76,7 +76,7 @@ public sealed class RouteManager : Platform.IRouteManager
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  could not read the journal ({ex.Message}); rebuilding");
+                ActivityLog.WriteAndPrint($"  could not read the journal ({ex.Message}); rebuilding");
             }
         }
 
@@ -93,7 +93,7 @@ public sealed class RouteManager : Platform.IRouteManager
             var commands = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_journalPath));
             if (commands is { Count: > 0 })
             {
-                Console.WriteLine($"  recovering {commands.Count} route change(s) from a previous run...");
+                ActivityLog.WriteAndPrint($"  recovering {commands.Count} route change(s) from a previous run...");
                 // Reverse order: undo the last change first.
                 for (int i = commands.Count - 1; i >= 0; i--)
                     RunQuiet(commands[i]);
@@ -101,7 +101,7 @@ public sealed class RouteManager : Platform.IRouteManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  route recovery failed (continuing): {ex.Message}");
+            ActivityLog.WriteAndPrint($"  route recovery failed (continuing): {ex.Message}");
         }
         finally
         {
@@ -156,7 +156,7 @@ public sealed class RouteManager : Platform.IRouteManager
         {
             var (ok, output) = Run(doCmd);
             if (!ok)
-                Console.WriteLine($"  warning: '{doCmd}' -> {output.Trim()}");
+                ActivityLog.WriteAndPrint($"  warning: '{doCmd}' -> {output.Trim()}");
         }
 
         _applied = true;
@@ -190,13 +190,13 @@ public sealed class RouteManager : Platform.IRouteManager
         {
             // The replacement owns these now. Removing them here is exactly the
             // gap in connectivity a handover exists to avoid.
-            Console.WriteLine("  leaving routes in place for the incoming instance");
+            ActivityLog.WriteAndPrint("  leaving routes in place for the incoming instance");
             return;
         }
 
         if (!_applied && _undoCommands.Count == 0) return;
 
-        Console.WriteLine("  restoring routes...");
+        ActivityLog.WriteAndPrint("  restoring routes...");
         for (int i = _undoCommands.Count - 1; i >= 0; i--)
             RunQuiet(_undoCommands[i]);
 
@@ -218,7 +218,7 @@ public sealed class RouteManager : Platform.IRouteManager
         string? gateway = DefaultGateway();
         if (gateway is null)
         {
-            Console.WriteLine("  no default gateway found; split rules will not take effect");
+            ActivityLog.WriteAndPrint("  no default gateway found; split rules will not take effect");
             return;
         }
 
@@ -235,7 +235,7 @@ public sealed class RouteManager : Platform.IRouteManager
                 : destination + " mask 255.255.255.255";
 
             var (ok, output) = Run($"route add {spec} {gateway} metric 1");
-            if (!ok) Console.WriteLine($"  could not exclude {destination}: {output.Trim()}");
+            if (!ok) ActivityLog.WriteAndPrint($"  could not exclude {destination}: {output.Trim()}");
             else _undoCommands.Add($"route delete {destination.Split('/')[0]}");
         }
 
@@ -281,8 +281,8 @@ public sealed class RouteManager : Platform.IRouteManager
         {
             // A journal we cannot write is a real risk, not a detail: without it
             // a crash could leave the machine unroutable. Say so loudly.
-            Console.WriteLine($"  WARNING: could not write the route journal ({ex.Message}).");
-            Console.WriteLine("  If this process dies uncleanly you may need to remove routes by hand.");
+            ActivityLog.WriteAndPrint($"  WARNING: could not write the route journal ({ex.Message}).");
+            ActivityLog.WriteAndPrint("  If this process dies uncleanly you may need to remove routes by hand.");
         }
     }
 

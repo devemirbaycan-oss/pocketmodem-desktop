@@ -14,6 +14,12 @@ class Program
         // First thing: a crash during startup is exactly the one nobody can
         // otherwise explain.
         CrashLog.Install();
+
+        // Everything the app does, kept for an hour. CrashLog covers the
+        // process dying; this covers why a connection failed, which is where
+        // the answers usually are and which previously went to a console the
+        // GUI does not have.
+        PocketModem.Client.ActivityLog.Start();
         Run(args);
     }
 

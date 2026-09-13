@@ -561,7 +561,9 @@ internal static class Commands
             if (joiner.IsVisible())
                 problems.Add("The phone's group is visible. Connect to it, or run 'pocketmodem connect' with the passphrase.");
             else
-                problems.Add("The phone's group is not visible. Open the app on the phone and tap Wi-Fi Direct.");
+                problems.Add("The phone's group is not visible. Open the app on the phone and tap Wi-Fi Direct. "
+                + "If it is already on, check the phone's mobile hotspot is OFF - "
+                + "a phone cannot run a hotspot and Wi-Fi Direct at the same time.");
         }
 
         // 4. Reachability

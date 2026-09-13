@@ -289,6 +289,23 @@ public partial class MainWindow : Window
             TotalUp.Text = $"{FormatBytes(up)} up";
             LinkCount.Text = $"{s.Links} of {s.MaxLinks}";
             StreamCount.Text = s.ActiveStreams.ToString();
+
+            // The phone's count, when it reports one. Amber once it runs well
+            // ahead of this PC's: that gap is the phone holding streams it has
+            // already closed, and it ends with every new TCP connection
+            // refused while UDP keeps working.
+            int phoneStreams = s.PhoneStreams;
+            if (phoneStreams < 0)
+            {
+                PhoneStreamCount.Text = "-";
+                PhoneStreamCount.Foreground = Grey;
+            }
+            else
+            {
+                PhoneStreamCount.Text = phoneStreams.ToString();
+                bool drifting = phoneStreams > s.ActiveStreams + 50;
+                PhoneStreamCount.Foreground = drifting ? Amber : Brushes.White;
+            }
             ReconnectCount.Text = s.Reconnects.ToString();
             Uptime.Text = FormatDuration(now - _connectedAt);
 
@@ -422,6 +439,10 @@ public partial class MainWindow : Window
 
     private void SetStatus(string status, string detail, IBrush colour)
     {
+        // Every state the user is shown goes to the log too, so a report of
+        // "it said could not connect" can be matched against what led to it.
+        PocketModem.Client.ActivityLog.Write($"status: {status} - {detail}");
+
         StatusText.Text = status;
         DetailText.Text = detail;
         StatusDot.Fill = colour;

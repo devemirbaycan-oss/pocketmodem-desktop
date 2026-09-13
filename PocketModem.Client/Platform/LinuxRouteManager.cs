@@ -49,7 +49,7 @@ public sealed class LinuxRouteManager : IRouteManager
 
         if (tunnelReachable())
         {
-            Console.WriteLine("  adopting the routes already in place");
+            ActivityLog.WriteAndPrint("  adopting the routes already in place");
             try
             {
                 var existing = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_journalPath));
@@ -63,7 +63,7 @@ public sealed class LinuxRouteManager : IRouteManager
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  could not read the journal ({ex.Message}); rebuilding");
+                ActivityLog.WriteAndPrint($"  could not read the journal ({ex.Message}); rebuilding");
             }
         }
 
@@ -79,13 +79,13 @@ public sealed class LinuxRouteManager : IRouteManager
             var commands = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_journalPath));
             if (commands is { Count: > 0 })
             {
-                Console.WriteLine($"  recovering {commands.Count} route change(s) from a previous run...");
+                ActivityLog.WriteAndPrint($"  recovering {commands.Count} route change(s) from a previous run...");
                 for (int i = commands.Count - 1; i >= 0; i--) Run(commands[i]);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  route recovery failed (continuing): {ex.Message}");
+            ActivityLog.WriteAndPrint($"  route recovery failed (continuing): {ex.Message}");
         }
         finally
         {
@@ -114,7 +114,7 @@ public sealed class LinuxRouteManager : IRouteManager
         }
         else
         {
-            Console.WriteLine(
+            ActivityLog.WriteAndPrint(
                 "  note: systemd-resolved not found; set DNS manually if name " +
                 $"resolution fails (nameserver {dns})");
         }
@@ -146,7 +146,7 @@ public sealed class LinuxRouteManager : IRouteManager
         foreach (var (doCmd, _) in toApply)
         {
             var (ok, output) = Run(doCmd);
-            if (!ok) Console.WriteLine($"  warning: '{doCmd}' -> {output.Trim()}");
+            if (!ok) ActivityLog.WriteAndPrint($"  warning: '{doCmd}' -> {output.Trim()}");
         }
 
         _applied = true;
@@ -163,7 +163,7 @@ public sealed class LinuxRouteManager : IRouteManager
         var (ok, route) = Run("ip route show default");
         if (!ok || route.Length == 0)
         {
-            Console.WriteLine("  no default route found; split rules will not take effect");
+            ActivityLog.WriteAndPrint("  no default route found; split rules will not take effect");
             return;
         }
 
@@ -172,7 +172,7 @@ public sealed class LinuxRouteManager : IRouteManager
         int viaAt = Array.IndexOf(parts, "via");
         if (viaAt < 0 || viaAt + 1 >= parts.Length)
         {
-            Console.WriteLine("  could not read the default gateway; split rules will not take effect");
+            ActivityLog.WriteAndPrint("  could not read the default gateway; split rules will not take effect");
             return;
         }
         string gateway = parts[viaAt + 1];
@@ -185,7 +185,7 @@ public sealed class LinuxRouteManager : IRouteManager
 
             string spec = destination.Contains('/') ? destination : destination + "/32";
             var (added, output) = Run($"ip route add {spec} via {gateway}");
-            if (!added) Console.WriteLine($"  could not exclude {destination}: {output.Trim()}");
+            if (!added) ActivityLog.WriteAndPrint($"  could not exclude {destination}: {output.Trim()}");
             else _undoCommands.Add($"ip route del {spec}");
         }
 
@@ -196,13 +196,13 @@ public sealed class LinuxRouteManager : IRouteManager
     {
         if (HandingOver)
         {
-            Console.WriteLine("  leaving routes in place for the incoming instance");
+            ActivityLog.WriteAndPrint("  leaving routes in place for the incoming instance");
             return;
         }
 
         if (!_applied && _undoCommands.Count == 0) return;
 
-        Console.WriteLine("  restoring routes...");
+        ActivityLog.WriteAndPrint("  restoring routes...");
         for (int i = _undoCommands.Count - 1; i >= 0; i--) Run(_undoCommands[i]);
 
         _undoCommands.Clear();
@@ -218,8 +218,8 @@ public sealed class LinuxRouteManager : IRouteManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  WARNING: could not write the route journal ({ex.Message}).");
-            Console.WriteLine("  If this process dies uncleanly you may need to remove routes by hand.");
+            ActivityLog.WriteAndPrint($"  WARNING: could not write the route journal ({ex.Message}).");
+            ActivityLog.WriteAndPrint("  If this process dies uncleanly you may need to remove routes by hand.");
         }
     }
 
