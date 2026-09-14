@@ -138,6 +138,10 @@ public sealed class ConnectionManager : IDisposable
                     if (DateTime.UtcNow - _lastPong > PongTimeout)
                     {
                         StateChanged?.Invoke("no response from phone - reconnecting");
+                        ActivityLog.Write(
+                            $"reconnect: no pong for {PongTimeout.TotalSeconds:F0}s. " +
+                            $"links={client.ConnectedLinks}/{Tunnel.TunnelClient.LinkCount} " +
+                            $"recent closes: {string.Join("; ", client.RecentCloses.Take(4))}");
                         await ReconnectAsync(ct);
                     }
                     else if (!client.UpstreamUp)
@@ -153,6 +157,9 @@ public sealed class ConnectionManager : IDisposable
                 else
                 {
                     StateChanged?.Invoke("tunnel closed - reconnecting");
+                    ActivityLog.Write(
+                        "reconnect: every link is down. recent closes: " +
+                        string.Join("; ", _lastCloses.Take(4)));
                     await ReconnectAsync(ct);
                 }
             }
@@ -171,6 +178,12 @@ public sealed class ConnectionManager : IDisposable
     {
         var old = _client;
         _client = null;
+
+        // The replacement counts from zero, so a total carried over from the
+        // old client would be compared against a number the new one may never
+        // reach - leaving the "bytes arriving prove the tunnel works" guard
+        // permanently false. That is how one reconnect became fifty.
+        _lastBytesSeen = 0;
         if (old is not null)
         {
             // Capture before disposing: otherwise the reasons disappear at the
